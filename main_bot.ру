@@ -1,0 +1,85 @@
+import hashlib
+import asyncio
+import requests
+import uvicorn
+from fastapi import FastAPI, Request
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# === ВАШИ ДАННЫЕ ===
+BOT_TOKEN = "8831617484:AAGpvVnZP7lBxu9wlPPxB3Rsx4HSVvgqECA"
+CRYSTAL_ID = "grigosshop"
+CRYSTAL_SECRET = "c27738a5bb370a1060eba92210d7fdcd5b3ceb75"
+CRYSTAL_SALT = "2c6abdcaba4c5534e7b2ed6a687144fdc37cf350"
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+app = FastAPI()
+
+# --- Функция создания счета в CrystalPay ---
+def create_crystal_invoice(amount: float, user_id: str) -> str:
+    url = "https://api.crystalpay.io/v2/invoice/create/"
+    payload = {
+        "auth_login": CRYSTAL_ID,
+        "auth_secret": CRYSTAL_SECRET,
+        "amount": amount,
+        "type": "purchase",
+        "lifetime": 60,
+        "extra": user_id,
+    }
+    response = requests.post(url, json=payload).json()
+    if not response.get("error"):
+        return response["url"]
+    else:
+        print("Ошибка CrystalPay:", response)
+        return None
+
+# --- Обработка команды /start ---
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    user_id = str(message.from_user.id)
+    amount_rub = 100.0  # Тестовая сумма в рублях
+    
+    pay_url = create_crystal_invoice(amount=amount_rub, user_id=user_id)
+    if pay_url:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"💳 Оплатить {amount_rub} ₽", url=pay_url)]
+        ])
+        await message.answer("Нажмите кнопку ниже для оплаты счета:", reply_markup=kb)
+    else:
+        await message.answer("Ошибка формирования счета. Проверьте логи.")
+
+# --- Прием Webhook от CrystalPay ---
+@app.post("/crystalpay/callback")
+async def crystal_webhook(request: Request):
+    data = await request.json()
+    
+    if data.get("state") == "payed":
+        invoice_id = data.get("id")
+        user_id = data.get("extra")
+        
+        # Проверка цифровой подписи
+        sign_check = hashlib.sha256(f"{invoice_id}:{CRYSTAL_SALT}".encode()).hexdigest()
+        
+        if data.get("signature") == sign_check:
+            try:
+                await bot.send_message(
+                    chat_id=int(user_id),
+                    text="✅ **Оплата успешно прошла!**\n\nТовар/активы выданы."
+                )
+            except Exception as e:
+                print(f"Ошибка отправки сообщения: {e}")
+            return {"status": "ok"}
+            
+    return {"status": "error"}
+
+# --- Запуск бота и веб-сервера ---
+async def main():
+    asyncio.create_task(dp.start_polling(bot))
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+if __name__ == "__main__":
+    asyncio.run(main())
